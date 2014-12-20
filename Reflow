@@ -1,0 +1,226 @@
+
+#include "Adafruit_MAX31855.h"
+#include <LiquidCrystal.h>
+
+int thermoDO = 5;
+int thermoCS1 = 4;
+int thermoCS2 = 2;
+int thermoCLK = 3;
+int startstop = 8;
+int mode      = 9;
+int relaypin  = 6;
+
+int state = 0;
+
+boolean started = 0;
+boolean startstoppressed = 0;
+boolean modepressed = 0;
+
+int profiles = 0;
+
+int profile[4][6] = {
+  {
+    75,140,45,125,205,20                                    }
+  ,
+  {
+    75,140,45,125,205,20                                    }
+  ,
+  {
+    75,140,45,125,205,20                                    }
+  ,
+  {
+    75,140,45,125,205,20                                    }
+};
+
+String profileNames[4] = {
+  "Ol' Fashioned Pb", "New Fangled RoHS", "Profile 3       ", "Profile 4       "
+};
+
+
+Adafruit_MAX31855 thermocouple1(thermoCLK, thermoCS1, thermoDO);
+Adafruit_MAX31855 thermocouple2(thermoCLK, thermoCS2, thermoDO);
+
+LiquidCrystal lcd(A0, A1, A2, A3, A4, A5);
+
+// volatile means it is going to be messed with inside an interrupt 
+// otherwise the optimization code will ignore the interrupt
+
+volatile float seconds = 0;  // this will get incremented once a second
+volatile long count = 0;
+volatile int lcdCount = 0;
+volatile float temp_avg;  // in celsius
+volatile float temp1 = 0;
+volatile float temp2 = 0;
+
+// the current temperature
+int target_temperature;
+
+// we need this to be a global variable because we add error each second
+float Summation;        // The integral of error since time = 0
+
+int relay_state;       // whether the relay pin is high (on) or low (off)
+
+void setup() {  
+  Serial.begin(9600); 
+
+  // set up the LCD's number of columns and rows: 
+  lcd.begin(16, 2);
+  // Print a message to the LCD.
+  lcd.print("Reflow Oven");
+  lcd.setCursor(0,1);
+  lcd.print("Rev 2");
+
+  delay(1000);
+  lcd.clear();
+
+  lcd.setCursor(15,1);
+  lcd.print(state);
+
+  lcd.setCursor(0,0);
+  lcd.print(profileNames[profiles]);
+
+  lcd.setCursor(0,1);
+  lcd.print("Temp: ");
+  lcd.setCursor(6,1);
+  lcd.print((int)seconds);
+  lcd.print(" C   "); 
+
+  // the relay pin controls the plate
+  pinMode(relaypin, OUTPUT);
+  // ...and turn it off to start!
+  digitalWrite(relaypin, LOW);
+
+  pinMode(startstop, INPUT);
+  digitalWrite(startstop, HIGH);
+
+  pinMode(mode, INPUT);
+  digitalWrite(mode,HIGH);
+
+  // Setup 1 Hz timer to refresh display using 16 Timer 1
+  TCCR1A = 0;                           // CTC mode (interrupt after timer reaches OCR1A)
+  TCCR1B = _BV(WGM12) | _BV(CS10) | _BV(CS12);    // CTC & clock div 1024
+  OCR1A = 3902;                                 // 16mhz / 1024 / 15609 = 1 Hz
+  TIMSK1 = _BV(OCIE1A);                          // turn on interrupt
+}
+
+
+// This is the Timer 1 CTC interrupt, it goes off once a second
+SIGNAL(TIMER1_COMPA_vect) { 
+
+  float temp_temp;
+  float previous_temp1 = temp1;
+  float previous_temp2 = temp2;
+  int error;
+
+  count ++;
+  seconds = (float) count / 4;
+
+  temp_temp = thermocouple1.readCelsius();
+  if (isnan(temp_temp)){
+    temp1 = previous_temp1; 
+  }
+  else{
+    temp1 = temp_temp; 
+  }
+
+  temp_temp = thermocouple2.readCelsius();
+  if (isnan(temp_temp)){
+    temp2 = previous_temp2; 
+  }
+  else{
+    temp2 = temp_temp; 
+  }
+
+  temp_avg = (temp1 + temp2)/2;
+
+  lcd.setCursor(0,1);
+  lcd.print("Temp: ");
+  lcd.setCursor(6,1);
+  lcd.print(temp_avg);
+  lcd.print(" C   ");  
+  lcd.setCursor(15,1);
+  lcd.print(state);
+
+  switch(state){
+  case 0:
+    digitalWrite(relaypin, LOW);
+    break;  
+
+  case 1:
+    analogWrite(relaypin,profile[profiles][0]);
+    if (temp_avg >= profile[profiles][1]){
+      state = 2;
+      count = 0;  
+    }
+    break;  
+
+  case 2:
+    if (temp_avg < profile[profiles][1])
+      digitalWrite(relaypin, HIGH);
+    else
+      digitalWrite(relaypin, LOW);
+    if (seconds >= profile[profiles][2]){
+      state = 3;  
+    }
+    break;  
+
+  case 3:
+    analogWrite(relaypin,profile[profiles][3]);
+    if (temp_avg >= profile[profiles][4]){
+      state = 4;
+      count = 0;  
+    }
+    break;  
+
+  case 4:
+    if (temp_avg < profile[profiles][4])
+      digitalWrite(relaypin, HIGH);
+    else
+      digitalWrite(relaypin, LOW);
+    if (seconds >= profile[profiles][5]){
+      state = 0;  
+      digitalWrite(relaypin, LOW);
+    }
+    break;  
+
+  default:
+    digitalWrite(relaypin, LOW);
+    state = 0;
+    count = 0;
+    break;  
+  }
+
+  if (digitalRead(startstop) == LOW && !startstoppressed){
+    startstoppressed = 1;
+    lcd.setCursor(15,1);
+    lcd.print(state);
+    if (started == 1){
+      started = 0;
+      state = 0;
+      digitalWrite(relaypin, LOW);
+    }
+    else{
+      started = 1; 
+      state = 1;
+    } 
+  }
+  if (digitalRead(startstop) == HIGH)
+    startstoppressed = 0;
+
+  if (digitalRead(mode) == LOW && !modepressed){
+    modepressed = 1;
+    if (profiles < 3)
+      profiles++;
+    else
+      profiles = 0;
+
+    lcd.setCursor(0,0);
+    lcd.print(profileNames[profiles]);
+  }  
+  if (digitalRead(mode) == HIGH)
+    modepressed = 0;
+}
+
+void loop() { 
+
+}
